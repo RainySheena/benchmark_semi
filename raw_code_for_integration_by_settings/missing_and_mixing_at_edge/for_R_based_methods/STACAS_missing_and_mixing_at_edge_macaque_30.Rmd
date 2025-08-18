@@ -1,0 +1,114 @@
+## Read the datasets
+```{r}
+library(Matrix)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+library(STACAS)
+
+
+# Suppress all warnings
+options(warn = -1)
+
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 32 * 1024^3) 
+mem.maxVSize(640000)
+```
+
+## Convert a SingleCellExperiment object to a Seurat one
+
+```{r}
+# Load required libraries
+library(SingleCellExperiment)
+library(Seurat)
+
+# Load your SCE object
+sce_object <- readRDS("../macaque_raw.rds")
+
+# Extract counts and metadata
+sce_data <- counts(sce_object)
+meta_data <- as.data.frame(colData(sce_object))
+
+# Create a Seurat object
+seurat_object <- CreateSeuratObject(
+    counts = sce_data,
+    meta.data = meta_data
+)
+
+# Optional: Transfer PCA from SCE to Seurat
+if ("PCA" %in% reducedDimNames(sce_object)) {
+    seurat_object[["pca"]] <- CreateDimReducObject(
+        embeddings = reducedDim(sce_object, "PCA"),
+        key = "PC_",
+        assay = DefaultAssay(seurat_object)
+    )
+}
+
+# Save the Seurat object
+saveRDS(seurat_object, "../macaque_raw_seurat.rds")
+```
+
+
+```{r}
+# Load the new labels CSV file
+object <- readRDS("../macaque_raw_seurat.rds")
+
+new_labels <- read.csv('./labels/missing_and_mixing_at_edge_macaque_30_obs.csv', row.names = 1)
+
+object@meta.data <- new_labels
+```
+
+
+```{r}
+# Save raw data
+object <- FindVariableFeatures(object, selection.method = 'vst', nfeatures = 2000)
+
+# Save the counts layer
+object[["RNA"]]@layers[["counts"]] <- GetAssayData(object, layer = "counts")
+
+# Filter cells with at least 300 genes
+object[["nFeature_RNA"]] <- Matrix::colSums(GetAssayData(object, slot = "counts") > 0)
+object <- subset(object, subset = nFeature_RNA >= 300)
+
+# Identify features (genes) expressed in at least 5 cells
+expressed_genes <- rownames(object[["RNA"]]@layers[["counts"]])[rowSums(object[["RNA"]]@layers[["counts"]] > 0) >= 5]
+
+# Subset the Seurat object based on these genes
+object <- subset(object, features = expressed_genes)
+
+# Normalize per cell
+object <- NormalizeData(object, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+nfeatures <- 2000
+ndim <- 50
+
+# Save the original cell order
+original_cell_order <- colnames(object[["RNA"]]@layers[["counts"]])
+
+obj.list <- SplitObject(object, split.by = "batch")
+
+# Semi-supervised integration
+object_integrated_ss <- obj.list %>%
+  Run.STACAS(dims = 1:ndim, anchor.features = nfeatures, cell.labels = "new_labels", label.confidence = 0.5)
+
+# Run PCA on the integrated data
+object_integrated_ss <- object_integrated_ss %>% ScaleData() %>%
+  RunPCA(npcs=ndim)
+ 
+# Extract PCA embeddings
+pca_embeddings <- Embeddings(object_integrated_ss, reduction = "pca")
+
+# Order PCA embeddings by the original cell order
+pca_embeddings_ordered <- pca_embeddings[match(original_cell_order, rownames(pca_embeddings)), ]
+
+# Save PCA embeddings to a CSV file
+write.csv(pca_embeddings_ordered, file = "./embeddings/macaque_stacas_embeddings_missing_and_mixing_at_edge_30.csv", row.names = TRUE)
+```
+
+

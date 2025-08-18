@@ -1,0 +1,127 @@
+## Read the datasets
+```{r}
+library(Matrix)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+library(STACAS)
+
+
+# Suppress all warnings
+options(warn = -1)
+
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 32 * 1024^3) 
+mem.maxVSize(640000)
+```
+
+```{R}
+Convert("./human_immune.h5ad", dest = "h5seurat", overwrite = TRUE)
+
+# Load the .h5seurat file into a Seurat object
+object <- LoadH5Seurat("./human_immune.h5seurat", assays = "RNA")
+
+# Load the hard labels CSV file
+batch_labels <- read.csv('./batch_labels_human_immune_70.csv', row.names = 1)
+```
+
+```{r}
+# preprocessing
+object <- FindVariableFeatures(object, selection.method = 'vst', nfeatures = 2000)
+
+# Save the counts layer
+object[["RNA"]]@data <- GetAssayData(object, slot = "counts")
+
+# Filter cells with at least 300 genes
+object$nFeature_RNA <- Matrix::colSums(object[["RNA"]]@counts > 0)
+object <- subset(object, subset = nFeature_RNA >= 300)
+
+# Filter genes expressed in at least 5 cells
+object <- subset(object, features = rowSums(object[["RNA"]]@counts > 0) >= 5)
+
+# Normalize per cell
+object <- NormalizeData(object, normalization.method = "LogNormalize", scale.factor = 10000)
+
+# Add the new labels to the Seurat object's metadata
+object@meta.data$batch_labels <- batch_labels$batch_labels
+```
+
+
+```{r}
+nfeatures <- 2000
+ndim <- 50
+
+# Save the original cell order
+original_cell_order <- colnames(object@assays$RNA@counts)
+
+obj.list <- SplitObject(object, split.by = "batch")
+
+# Semi-supervised integration
+object_integrated_ss <- obj.list %>%
+  Run.STACAS(dims = 1:ndim, anchor.features = nfeatures, cell.labels = "batch_labels", label.confidence = 0.5)
+
+# Run PCA on the integrated data
+object_integrated_ss <- object_integrated_ss %>% ScaleData() %>%
+  RunPCA(npcs=ndim)
+ 
+# Extract PCA embeddings
+pca_embeddings <- Embeddings(object_integrated_ss, reduction = "pca")
+
+# Order PCA embeddings by the original cell order
+pca_embeddings_ordered <- pca_embeddings[match(original_cell_order, rownames(pca_embeddings)), ]
+```
+
+```{r}
+# To save the embeddings as a separate file (e.g., CSV), you can use write.csv
+write.csv(pca_embeddings_ordered, file = "./human_immune_stacas_embeddings_partially_annotated_batches_70.csv", row.names = TRUE)
+```
+
+### apply knn label transfered defined by stacas
+```{r}
+library(class)
+# Calculate pairwise distances using Euclidean distance
+distances <- as.matrix(dist(pca_embeddings_ordered))
+
+# Define the number of nearest neighbors
+k <- 3  # Number of nearest neighbors
+
+# Initialize a vector for final annotations
+final_annotations <- object_integrated_ss$batch_labels
+
+# Identify cells without labels (NA)
+unlabeled_cells <- which(is.na(final_annotations))
+
+# Iterate over unlabeled cells and transfer labels
+for (cell in unlabeled_cells) {
+  # Get distances for the current cell
+  cell_distances <- distances[cell, ]
+  
+  # Get indices of the k nearest neighbors
+  neighbors <- order(cell_distances)[1:k]
+  
+  # Get the labels of the nearest neighbors
+  neighbor_labels <- object_integrated_ss$batch_labels[neighbors]
+  
+  # Exclude NA labels from neighbors
+  neighbor_labels <- neighbor_labels[!is.na(neighbor_labels)]
+  
+  # Assign the majority label as the final annotation
+  if (length(neighbor_labels) > 0) {
+    final_annotations[cell] <- names(sort(table(neighbor_labels), decreasing = TRUE))[1]
+  }
+}
+
+# Match final_annotations with the original cell order
+final_annotations_ordered <- final_annotations[match(original_cell_order, rownames(pca_embeddings))]
+```
+
+```{r}
+# Save to CSV file
+write.csv(final_annotations_ordered, file = "./human_immune_stacas_embeddings_final_annotations_ordered.csv", row.names = FALSE)
+```
+
+

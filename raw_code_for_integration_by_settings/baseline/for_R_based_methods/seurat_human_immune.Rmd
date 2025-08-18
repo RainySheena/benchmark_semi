@@ -1,0 +1,80 @@
+## Read the datasets
+```{r}
+library(Matrix)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 16 * 1024^3) 
+
+mem.maxVSize(640000)
+```
+
+```{R}
+# no need to run every time
+# Convert the .h5ad file to .h5seurat
+Convert("./human_immune.h5ad", dest = "h5seurat", overwrite = TRUE)
+
+# Load the .h5seurat file into a Seurat object with specific assays
+seurat_obj <- LoadH5Seurat("./human_immune.h5seurat", assays = "RNA")
+
+# Print the Seurat object to verify the conversion
+print(seurat_obj)
+```
+
+```{r}
+# 将计数层保存到counts中
+seurat_obj@assays$RNA@counts <- seurat_obj@assays$RNA@data
+
+seurat_obj[["nFeature_RNA"]] <- Matrix::colSums(seurat_obj@assays$RNA@counts > 0)
+seurat_obj[["nCount_RNA"]] <- Matrix::colSums(seurat_obj@assays$RNA@count
+# 过滤细胞和基因
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA > 300)
+seurat_obj <- subset(seurat_obj, subset = nCount_RNA > 5)
+
+# 规范化
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+# 识别高度可变基因
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000, assay = "RNA")
+
+# 保留高度可变基因
+# 注意：Seurat 不会在筛选高度可变基因后自动删除非变异基因，因此需要手动添加步骤
+seurat_obj <- seurat_obj[, seurat_obj@assays$RNA@var.features]
+
+```
+
+
+```{r}
+# Perform integration with SCTransform-normalized datasets
+original_cell_order <- colnames(seurat_obj@assays$RNA@counts)
+
+seurat_obj[["RNA"]] <- split(seurat_obj[["RNA"]], f = seurat_obj$batch)
+seurat_obj <- SCTransform(seurat_obj)
+
+seurat_obj <- RunPCA(seurat_obj, npcs = 50, verbose = F)
+
+seurat_obj <- IntegrateLayers(
+  object = seurat_obj, method = RPCAIntegration,
+  new.reduction = "integrated.rpca", normalization.method = "SCT",
+  verbose = FALSE
+)
+```
+
+```{r}
+# Compute neighbors and UMAP
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30, reduction = "integrated.rpca")
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:30, reduction = "integrated.rpca")
+
+# Plot the UMAP results
+DimPlot(seurat_obj, reduction = "umap", group.by = "batch") + ggtitle("UMAP colored by Batch")
+DimPlot(seurat_obj, reduction = "umap", group.by = "cell_type") + ggtitle("UMAP colored by Cell Type")
+
+```
+
+

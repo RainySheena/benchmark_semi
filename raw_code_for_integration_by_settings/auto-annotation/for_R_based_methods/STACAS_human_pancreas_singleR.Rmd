@@ -1,0 +1,116 @@
+## Read the datasets
+```{r}
+# ---------------------- #
+
+rm(list = ls(all.names = TRUE)) # will clear all objects including hidden objects
+gc() # free up memory and report the memory usage
+options(max.print = .Machine$integer.max, scipen = 999, stringsAsFactors = F, dplyr.summarise.inform = F) # avoid truncated output in R console and scientific notation
+
+# Set seed
+set.seed(666)
+
+# Suppress all warnings
+options(warn = -1)
+
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 32 * 1024^3) 
+mem.maxVSize(640000)
+
+# Loading relevant libraries 
+library(tidyverse) # includes ggplot2, for data visualisation. dplyr, for data manipulation.
+library(celldex)
+library(SingleR)
+library(Seurat)
+library(Matrix)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+library(STACAS)
+library(scran)
+```
+
+```{r}
+# Convert the .h5ad file to .h5seurat
+# Convert("../human_pancreas_norm_processed.h5ad", dest = "h5seurat", overwrite = TRUE)
+
+# Load the .h5seurat file into a Seurat object
+object <- LoadH5Seurat("../human_pancreas_norm.h5seurat", assays = "RNA")
+```
+
+```{r}
+ref <- celldex::BlueprintEncodeData()
+unique(ref$label.main)
+```
+
+```{r}
+object <- FindVariableFeatures(object, selection.method = 'vst', nfeatures = 2000)
+
+# Save the counts layer
+object[["RNA"]]@data <- GetAssayData(object, slot = "counts")
+
+# Filter cells with at least 300 genes
+object[["nFeature_RNA"]] <- Matrix::colSums(GetAssayData(object, slot = "counts") > 0)
+object <- subset(object, subset = nFeature_RNA >= 300)
+
+# Filter genes expressed in at least 5 cells
+object <- subset(object, features = rowSums(object[["RNA"]]@counts > 0) >= 5)
+
+# Normalize per cell
+object <- NormalizeData(object, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+# Perform SingleR
+```{r}
+raw_counts <- LayerData(object, assay = "RNA", layer = 'counts')
+
+# Run SingleR (we can also use object directly)
+ct_ann <- SingleR(test = raw_counts, ref = ref, 
+                  labels = ref$label.main,
+                  de.method = 'wilcox')
+
+# Convert the predict_labels list to a data frame
+predict_labels_df <- data.frame(predict_labels = ct_ann@listData$pruned.labels)
+
+# Write the data frame to a CSV file
+write_csv(predict_labels_df, "./singleR_human_pancreas_predict_labels.csv")
+```
+
+```{r}
+predict_labels <- read.csv('./labels/singleR_human_pancreas_predict_labels.csv')
+
+# Add the new labels to the Seurat object's metadata
+object@meta.data$predict_labels <- predict_labels$predict_labels
+```
+
+
+```{r}
+nfeatures <- 2000
+ndim <- 50
+
+# Save the original cell order
+original_cell_order <- colnames(object@assays$RNA@counts)
+
+obj.list <- SplitObject(object, split.by = "tech")
+
+# Semi-supervised integration
+object_integrated_ss <- obj.list %>%
+  Run.STACAS(dims = 1:ndim, anchor.features = nfeatures, cell.labels = "predict_labels", label.confidence = 0.5)
+
+# Run PCA on the integrated data
+object_integrated_ss <- object_integrated_ss %>% ScaleData() %>%
+  RunPCA(npcs=ndim)
+ 
+# Extract PCA embeddings
+pca_embeddings <- Embeddings(object_integrated_ss, reduction = "pca")
+
+# Order PCA embeddings by the original cell order
+pca_embeddings_ordered <- pca_embeddings[match(original_cell_order, rownames(pca_embeddings)), ]
+
+# Save PCA embeddings to a CSV file
+write.csv(pca_embeddings_ordered, file = "./embeddings/human_pancreas_stacas_embeddings_singleR.csv", row.names = TRUE)
+```
+
+

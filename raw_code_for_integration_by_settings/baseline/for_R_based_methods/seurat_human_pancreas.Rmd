@@ -1,0 +1,51 @@
+## Read the datasets
+```{r}
+library(Matrix)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+```
+
+```{R}
+# no need to run every time
+# Convert the .h5ad file to .h5seurat
+Convert("./human_pancreas_norm.h5ad", dest = "h5seurat", overwrite = TRUE)
+
+# Load the .h5seurat file into a Seurat object with specific assays
+seurat_obj <- LoadH5Seurat("./human_pancreas_norm.h5seurat", assays = "RNA")
+```
+
+```{r}
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 16 * 1024^3) 
+
+# Perform integration with SCTransform-normalized datasets
+original_cell_order <- colnames(seurat_obj@assays$RNA@counts)
+
+seurat_obj[["RNA"]] <- split(seurat_obj[["RNA"]], f = seurat_obj$batch)
+seurat_obj <- SCTransform(seurat_obj)
+
+seurat_obj <- RunPCA(seurat_obj, npcs = 50, verbose = F)
+
+seurat_obj <- IntegrateLayers(
+  object = seurat_obj, method = RPCAIntegration,
+  new.reduction = "integrated.rpca", normalization.method = "SCT",
+  verbose = FALSE
+)
+```
+
+```{r}
+# Extract PCA embeddings
+pca_embeddings <- Embeddings(object, reduction = "pca")
+
+# Order PCA embeddings by the original cell order
+pca_embeddings_ordered <- pca_embeddings[match(original_cell_order, rownames(pca_embeddings)), ]
+
+write.csv(pca_embeddings_ordered, file = "./lung_two_species_seurat_embeddings.csv", row.names = TRUE)
+```
+
+

@@ -1,0 +1,64 @@
+## Read the datasets
+```{r}
+library(Matrix)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+library(anndata)
+library(reticulate)
+
+# Suppress all warnings
+options(warn = -1)
+
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 32 * 1024^3) 
+mem.maxVSize(640000)
+```
+
+```{r}
+object_1 <- readRDS("../Lung_two_species_raw.rds") 
+object <- as.Seurat(object_1, counts = 'counts')
+```
+
+```{r}
+# preprocessing
+object <- FindVariableFeatures(object, selection.method = 'vst', nfeatures = 2000)
+
+# Save the counts layer
+object[["RNA"]]@data <- GetAssayData(object, slot = "counts")
+
+# Filter cells with at least 300 genes
+object[["nFeature_RNA"]] <- Matrix::colSums(GetAssayData(object, slot = "counts") > 0)
+object <- subset(object, subset = nFeature_RNA >= 300)
+
+# Filter genes expressed in at least 5 cells
+object <- subset(object, features = rowSums(object[["RNA"]]@counts > 0) >= 5)
+
+# Normalize per cell
+object <- NormalizeData(object, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+original_cell_order <- colnames(object@assays$RNA@counts)
+object[["RNA"]] <- split(object[["RNA"]], f = object$batch)
+object <- SCTransform(object)
+
+object <- RunPCA(object, npcs = 50, verbose = F)
+object <- IntegrateLayers(
+  object = object, method = RPCAIntegration,
+  new.reduction = "integrated.rpca", normalization.method = "SCT",
+  verbose = FALSE
+)
+```
+
+```{r}
+integrated_rpca_embeddings <- Embeddings(object = object, reduction = "integrated.rpca")
+pca_embeddings <- integrated_rpca_embeddings[, 1:50]
+pca_embeddings_ordered <- pca_embeddings[match(original_cell_order, rownames(pca_embeddings)), ]
+
+write.csv(pca_embeddings_ordered, file = "./embeddings/lung_two_species_seurat_embeddings.csv", row.names = TRUE)
+```

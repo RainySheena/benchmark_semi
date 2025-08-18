@@ -1,0 +1,94 @@
+## Read the datasets
+```{r}
+library(Matrix)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+library(cluster)
+library(dplyr)
+library(SeuratDisk)
+library(STACAS)
+
+
+# Suppress all warnings
+options(warn = -1)
+
+# Increase the maximum allowed size for globals in the future package
+options(future.globals.maxSize = 32 * 1024^3) 
+mem.maxVSize(640000)
+```
+
+
+```{r}
+# Load the new labels CSV file
+object <- readRDS("../macaque_raw_seurat.rds")
+
+# Load the new labels CSV file
+new_labels <- read.csv('./labels/randomly_wrong_macaque_70_obs.csv', row.names = 1)
+
+# Add the new labels to the Seurat object's metadata
+object@meta.data$new_labels <- new_labels$new_labels
+```
+
+
+```{r}
+# Save raw data
+object <- FindVariableFeatures(object, selection.method = 'vst', nfeatures = 2000)
+
+# Save the counts layer
+object[["RNA"]]@layers[["counts"]] <- GetAssayData(object, layer = "counts")
+
+# Filter cells with at least 300 genes
+object[["nFeature_RNA"]] <- Matrix::colSums(GetAssayData(object, slot = "counts") > 0)
+object <- subset(object, subset = nFeature_RNA >= 300)
+
+# Identify features (genes) expressed in at least 5 cells
+expressed_genes <- rownames(object[["RNA"]]@layers[["counts"]])[rowSums(object[["RNA"]]@layers[["counts"]] > 0) >= 5]
+
+# Subset the Seurat object based on these genes
+object <- subset(object, features = expressed_genes)
+
+# Normalize per cell
+object <- NormalizeData(object, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+nfeatures <- 2000
+ndim <- 50
+
+# Save the original cell order
+original_cell_order <- colnames(object)
+
+obj.list <- SplitObject(object, split.by = "sample")
+
+# 1. Select the actual genes to integrate on:
+features <- SelectIntegrationFeatures(
+  object.list = obj.list,
+  nfeatures    = nfeatures
+)
+
+# Semi-supervised integration
+object_integrated_ss <- Run.STACAS(
+  object.list     = obj.list,
+  dims            = 1:ndim,
+  anchor.features = features,      # <- character vector, not a number
+  cell.labels     = "new_labels",
+  label.confidence= 0.5
+)
+
+# Run PCA on the integrated data
+object_integrated_ss <- object_integrated_ss %>% ScaleData() %>%
+  RunPCA(npcs=ndim)
+ 
+# Extract PCA embeddings
+pca_embeddings <- Embeddings(object_integrated_ss, reduction = "pca")
+
+# Order PCA embeddings by the original cell order
+pca_embeddings_ordered <- pca_embeddings[match(original_cell_order, rownames(pca_embeddings)), ]
+
+# Save PCA embeddings to a CSV file
+write.csv(pca_embeddings_ordered, file = "./embeddings/macaque_stacas_embeddings_randomly_wrong_70.csv", row.names = TRUE)
+```
+
+
